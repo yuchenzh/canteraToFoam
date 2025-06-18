@@ -44,6 +44,14 @@ def main(mech: str = "single", thermo_only: bool = False):
     print("\nGenerated OpenFOAM chemistry file:\n")
     print(chem_str)
 
+    # Show one example of a standard reversible Arrhenius reaction block
+    for i in range(len(ctf.gas.reactions())):
+        if ctf.check_reaction_type(i) == "reversibleArrhenius":
+            example = ctf._reversible_reaction_string(i)
+            print("\nExample reversibleArrhenius block:\n")
+            print(example)
+            break
+
 
 if __name__ == "__main__":
     import sys

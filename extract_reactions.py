@@ -36,11 +36,16 @@ finally:
         sys.path.insert(0, current_dir)
 
 
+from canteraToFoam import canteraToFoam
+
+
 def main(yaml_path: str) -> None:
-    """Print reaction equations and Arrhenius parameters."""
-    gas = ct.Solution(yaml_path)
+    """Print reaction equations, parameters and their inferred type."""
+    ctf = canteraToFoam(yaml_path)
+    gas = ctf.gas
     for idx, rxn in enumerate(gas.reactions()):
-        print(f"Reaction {idx + 1}: {rxn.equation}")
+        rtype = ctf.check_reaction_type(idx)
+        print(f"Reaction {idx + 1} ({rtype}): {rxn.equation}")
         rate = rxn.rate
         # Newer Cantera versions expose Arrhenius parameters via attributes
         # ``pre_exponential_factor``, ``temperature_exponent`` and
