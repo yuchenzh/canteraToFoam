@@ -170,6 +170,30 @@ class canteraToFoam:
 
     # --- Reaction writers ---------------------------------------------------
 
+    def is_reversible(self, index: int) -> bool:
+        """Return ``True`` if the reaction is reversible."""
+
+        rxn = self.gas.reactions()[index]
+        return getattr(rxn, "reversible", False)
+
+    def is_falloff(self, index: int) -> bool:
+        """Return ``True`` if the reaction is a falloff reaction."""
+
+        rtype = getattr(self.gas.reactions()[index], "reaction_type", "")
+        return rtype.startswith("falloff")
+
+    def is_troe(self, index: int) -> bool:
+        """Return ``True`` if the reaction uses Troe falloff."""
+
+        rtype = getattr(self.gas.reactions()[index], "reaction_type", "")
+        return "Troe" in rtype
+
+    def is_lindemann(self, index: int) -> bool:
+        """Return ``True`` if the reaction uses the Lindemann form."""
+
+        rtype = getattr(self.gas.reactions()[index], "reaction_type", "")
+        return "Lindemann" in rtype
+
     def check_reaction_type(self, index: int) -> str:
         """Return the OpenFOAM reaction type for the reaction at *index*.
 
@@ -180,24 +204,29 @@ class canteraToFoam:
         rxn = self.gas.reactions()[index]
         rtype = getattr(rxn, "reaction_type", "")
 
-        # Reactions with explicit orders are treated as irreversible
-        # Arrhenius reactions since OpenFOAM does not support arbitrary
-        # forward orders for reversible reactions.
+        # Reactions with explicit orders are treated as irreversible Arrhenius
+        # since OpenFOAM cannot represent arbitrary forward orders.
         if getattr(rxn, "orders", None):
             return "irreversibleArrhenius"
 
-        if rtype == "Arrhenius":
-            return "reversibleArrhenius" if rxn.reversible else "irreversibleArrhenius"
         if rtype == "three-body-Arrhenius":
             return (
                 "reversibleThirdBodyArrhenius"
-                if rxn.reversible
+                if self.is_reversible(index)
                 else "irreversibleThirdBodyArrhenius"
             )
-        if rtype.startswith("falloff"):
-            if "Troe" in rtype:
-                return "troeFalloffReaction"
-            return "falloffReaction"
+
+        if not self.is_reversible(index):
+            return "irreversibleArrhenius"
+
+        if not self.is_falloff(index):
+            return "reversibleArrhenius"
+
+        if self.is_troe(index):
+            return "reversibleArrheniusTroeFallOff"
+
+        if self.is_lindemann(index):
+            return "reversibleArrheniusLindemannFallOff"
 
         return "unknown"
 
