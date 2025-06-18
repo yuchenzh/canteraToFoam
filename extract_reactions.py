@@ -7,7 +7,7 @@ string along with Arrhenius parameters A, Ta, and b.
 Usage:
     python extract_reactions.py [PATH_TO_YAML]
 
-If no path is given, ``cantera/chem.yaml`` is used.
+If no path is given, ``singleStep/cantera/chem.yaml`` is used.
 """
 
 import os
@@ -36,11 +36,16 @@ finally:
         sys.path.insert(0, current_dir)
 
 
+from canteraToFoam import canteraToFoam
+
+
 def main(yaml_path: str) -> None:
-    """Print reaction equations and Arrhenius parameters."""
-    gas = ct.Solution(yaml_path)
+    """Print reaction equations, parameters and their inferred type."""
+    ctf = canteraToFoam(yaml_path)
+    gas = ctf.gas
     for idx, rxn in enumerate(gas.reactions()):
-        print(f"Reaction {idx + 1}: {rxn.equation}")
+        rtype = ctf.check_reaction_type(idx)
+        print(f"Reaction {idx + 1} ({rtype}): {rxn.equation}")
         rate = rxn.rate
         # Newer Cantera versions expose Arrhenius parameters via attributes
         # ``pre_exponential_factor``, ``temperature_exponent`` and
@@ -50,9 +55,12 @@ def main(yaml_path: str) -> None:
             b = rate.temperature_exponent
             Ea = rate.activation_energy
         except AttributeError:
-            A = rate.A
-            b = rate.b
-            Ea = rate.Ea
+            A = getattr(rate, "A", None)
+            b = getattr(rate, "b", None)
+            Ea = getattr(rate, "Ea", None)
+        if None in (A, b, Ea):
+            print("  Arrhenius parameters not available for this reaction type\n")
+            continue
         Ta = Ea / ct.gas_constant
         print(f"  A  = {A}")
         print(f"  Ta = {Ta}")
@@ -60,5 +68,7 @@ def main(yaml_path: str) -> None:
 
 
 if __name__ == "__main__":
-    path = sys.argv[1] if len(sys.argv) > 1 else os.path.join("cantera", "chem.yaml")
+    ROOT = os.path.dirname(os.path.abspath(__file__))
+    default = os.path.join(ROOT, "singleStep", "cantera", "chem.yaml")
+    path = sys.argv[1] if len(sys.argv) > 1 else default
     main(path)

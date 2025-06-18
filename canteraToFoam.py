@@ -171,11 +171,35 @@ class canteraToFoam:
     # --- Reaction writers ---------------------------------------------------
 
     def check_reaction_type(self, index: int) -> str:
-        """Return the OpenFOAM reaction type for the reaction at *index*."""
+        """Return the OpenFOAM reaction type for the reaction at *index*.
+
+        The mapping is based on :attr:`Reaction.reaction_type` provided by
+        Cantera. Only a few common types are recognized.
+        """
+
         rxn = self.gas.reactions()[index]
+        rtype = getattr(rxn, "reaction_type", "")
+
+        # Reactions with explicit orders are treated as irreversible
+        # Arrhenius reactions since OpenFOAM does not support arbitrary
+        # forward orders for reversible reactions.
         if getattr(rxn, "orders", None):
             return "irreversibleArrhenius"
-        return "arrhenius"
+
+        if rtype == "Arrhenius":
+            return "reversibleArrhenius" if rxn.reversible else "irreversibleArrhenius"
+        if rtype == "three-body-Arrhenius":
+            return (
+                "reversibleThirdBodyArrhenius"
+                if rxn.reversible
+                else "irreversibleThirdBodyArrhenius"
+            )
+        if rtype.startswith("falloff"):
+            if "Troe" in rtype:
+                return "troeFalloffReaction"
+            return "falloffReaction"
+
+        return "unknown"
 
     def _arrhenius_coeffs(self, index: int):
         return self.get_arrhenius_parameters(index)
@@ -212,6 +236,24 @@ class canteraToFoam:
         ]
         return "\n".join(lines)
 
+    def _reversible_reaction_string(self, index: int) -> str:
+        """Return an OpenFOAM reaction block for a reversible Arrhenius reaction."""
+
+        rxn = self.gas.reactions()[index]
+        A, Ta, b = self._arrhenius_coeffs(index)
+        eq = self._reaction_equation_string(rxn)
+        lines = [
+            f"un-named-reaction-{index}",
+            "{",
+            "    type            reversibleArrhenius;",
+            f"    reaction        \"{eq}\";",
+            f"    A               {A};",
+            f"    beta            {b};",
+            f"    Ta              {Ta};",
+            "}",
+        ]
+        return "\n".join(lines)
+
     def chemistry_file_string(self, indices=None) -> str:
         lines = ["reactions", "{"]
         if indices is None:
@@ -220,6 +262,8 @@ class canteraToFoam:
             typ = self.check_reaction_type(i)
             if typ == "irreversibleArrhenius":
                 block = self._irreversible_reaction_string(i)
+            elif typ == "reversibleArrhenius":
+                block = self._reversible_reaction_string(i)
             else:
                 block = ""  # unhandled types
             for ln in block.splitlines():
