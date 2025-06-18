@@ -7,7 +7,7 @@ string along with Arrhenius parameters A, Ta, and b.
 Usage:
     python extract_reactions.py [PATH_TO_YAML]
 
-If no path is given, ``cantera/chem.yaml`` is used.
+If no path is given, ``singleStep/cantera/chem.yaml`` is used.
 """
 
 import os
@@ -50,9 +50,12 @@ def main(yaml_path: str) -> None:
             b = rate.temperature_exponent
             Ea = rate.activation_energy
         except AttributeError:
-            A = rate.A
-            b = rate.b
-            Ea = rate.Ea
+            A = getattr(rate, "A", None)
+            b = getattr(rate, "b", None)
+            Ea = getattr(rate, "Ea", None)
+        if None in (A, b, Ea):
+            print("  Arrhenius parameters not available for this reaction type\n")
+            continue
         Ta = Ea / ct.gas_constant
         print(f"  A  = {A}")
         print(f"  Ta = {Ta}")
@@ -60,5 +63,7 @@ def main(yaml_path: str) -> None:
 
 
 if __name__ == "__main__":
-    path = sys.argv[1] if len(sys.argv) > 1 else os.path.join("cantera", "chem.yaml")
+    ROOT = os.path.dirname(os.path.abspath(__file__))
+    default = os.path.join(ROOT, "singleStep", "cantera", "chem.yaml")
+    path = sys.argv[1] if len(sys.argv) > 1 else default
     main(path)
