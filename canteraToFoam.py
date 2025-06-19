@@ -1,6 +1,8 @@
 import os
 import sys
 import importlib
+import numpy as np
+from copy import deepcopy
 
 # Ensure we import the actual Cantera package if installed
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -25,6 +27,13 @@ class canteraToFoam:
             raise ImportError("Cantera is required to use canteraToFoam")
         self.yaml_path = yaml_path
         self.gas = ct.Solution(yaml_path)
+        self.third_body_dict = self._construct_dummy_third_body_dict()
+        
+    def _construct_dummy_third_body_dict(self):
+        returnDict = {}
+        for sp in self.gas.species_names:
+            returnDict[sp] = 1
+        return returnDict
 
     def get_arrhenius_parameters(self, index: int):
         """Return Arrhenius A, Ta, and b for the reaction at *index*."""
@@ -258,7 +267,7 @@ class canteraToFoam:
         left = []
         orders = getattr(rxn, "orders", {})
         for sp, nu in rxn.reactants.items():
-            coeff = f"{nu}" if nu != 1 else ""
+            coeff = f"{round(nu)}" if (np.abs(nu-1)>1e-6) else ""
             order = orders.get(sp)
             if order is not None:
                 left.append(f"{coeff}{sp}^{order}")
@@ -266,7 +275,7 @@ class canteraToFoam:
                 left.append(f"{coeff}{sp}")
         right = []
         for sp, nu in rxn.products.items():
-            coeff = f"{nu}" if nu != 1 else ""
+            coeff = f"{round(nu)}" if (np.abs(nu-1)>1e-6) else ""
             right.append(f"{coeff}{sp}")
         return " + ".join(left) + " = " + " + ".join(right)
 
@@ -278,9 +287,9 @@ class canteraToFoam:
             "{",
             f"    type            {typ};",
             f"    reaction        \"{eq}\";",
-            f"    A               {A};",
-            f"    beta            {b};",
-            f"    Ta              {Ta};",
+            f"    A               {A:.6e};",
+            f"    beta            {b:.6f};",
+            f"    Ta              {Ta:.6f};",
         ]
         return lines
 
@@ -303,15 +312,27 @@ class canteraToFoam:
 
     # --- Extended reaction writers -----------------------------------------
 
+
     def _third_body_coeff_lines(self, effs: dict) -> list:
-        lines = ["    coeffs", str(len(effs)), "    ("]
+        # start with the dummy third body efficiencies
+        effs_true = deepcopy(self.third_body_dict)
+        
+        for sp, values in effs.items():
+            effs_true[sp] = values
+            
+        effs = effs_true
+        indent = f"    "
+        lines = [indent + str(len(effs))]
+        lines.append(indent  + "(")
         for sp, val in effs.items():
-            lines.append(f"    ({sp} {val})")
+            lines.append(indent*2  +f"({sp} {val})")
         lines += ["    )", "    ;"]
+     
         return lines
 
     def _third_body_efficiencies_block(self, effs: dict) -> list:
-        lines = ["    thirdBodyEfficiencies", "    {"]
+        #lines = ["    thirdBodyEfficiencies", "    {"]
+        lines = []
         inner = self._third_body_coeff_lines(effs)
         lines.extend(["        " + l.strip() if i > 0 else l for i, l in enumerate(inner)])
         lines.append("    }")
@@ -398,3 +419,5 @@ class canteraToFoam:
         lines.append("Tlow            200;")
         lines.append("Thigh           6000;")
         return "\n".join(lines)
+
+    
