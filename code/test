@@ -9,7 +9,7 @@ mkdir -p code/testResult
 cp test/single_thermo code/testResult/
 cp test/multi_thermo code/testResult/
 cp test/single_reactions code/testResult/
-cp test/multi_reaction_types code/testResult/
+cp test/multi_reactions code/testResult/
 
 echo "single step thermo"
 cat code/testResult/single_thermo
@@ -20,5 +20,5 @@ cat code/testResult/multi_thermo
 echo "single step reactions"
 cat code/testResult/single_reactions
 
-echo "multi step type of all reactions"
-cat code/testResult/multi_reaction_types
+echo "multi step reactions"
+cat code/testResult/multi_reactions

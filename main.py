@@ -73,6 +73,9 @@ def main(mech: str = "single", thermo_only: bool = False, make_tests: bool = Fal
         with open(os.path.join(test_dir, "multi_reaction_types"), "w") as f:
             f.write("\n".join(lines))
 
+        with open(os.path.join(test_dir, "multi_reactions"), "w") as f:
+            f.write(multi_ctf.chemistry_file_string())
+
     print("\nReaction types:")
     for i, rxn in enumerate(ctf.gas.reactions()):
         rtype = ctf.check_reaction_type(i)
@@ -84,6 +87,25 @@ def main(mech: str = "single", thermo_only: bool = False, make_tests: bool = Fal
             example = ctf._reversible_reaction_string(i)
             print("\nExample reversibleArrhenius block:\n")
             print(example)
+            break
+
+    # Show examples of other reaction types
+    for i, rxn in enumerate(ctf.gas.reactions()):
+        if ctf.check_reaction_type(i) == "reversibleThirdBodyArrhenius":
+            print("\nExample third-body block:\n")
+            print(ctf._third_body_reaction_string(i))
+            break
+
+    for i, rxn in enumerate(ctf.gas.reactions()):
+        if ctf.check_reaction_type(i) == "reversibleArrheniusLindemannFallOff":
+            print("\nExample Lindemann block:\n")
+            print(ctf._lindemann_reaction_string(i))
+            break
+
+    for i, rxn in enumerate(ctf.gas.reactions()):
+        if ctf.check_reaction_type(i) == "reversibleArrheniusTroeFallOff":
+            print("\nExample Troe block:\n")
+            print(ctf._troe_reaction_string(i))
             break
 
 
