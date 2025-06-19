@@ -179,20 +179,20 @@ class canteraToFoam:
     def is_falloff(self, index: int) -> bool:
         """Return ``True`` if the reaction is a falloff reaction."""
 
-        rtype = getattr(self.gas.reactions()[index], "reaction_type", "")
-        return rtype.startswith("falloff")
+        rtype = getattr(self.gas.reactions()[index], "reaction_type", "").lower()
+        return rtype in {"falloff-lindemann", "falloff-troe"}
 
     def is_troe(self, index: int) -> bool:
         """Return ``True`` if the reaction uses Troe falloff."""
 
-        rtype = getattr(self.gas.reactions()[index], "reaction_type", "")
-        return "Troe" in rtype
+        rtype = getattr(self.gas.reactions()[index], "reaction_type", "").lower()
+        return rtype == "falloff-troe"
 
     def is_lindemann(self, index: int) -> bool:
         """Return ``True`` if the reaction uses the Lindemann form."""
 
-        rtype = getattr(self.gas.reactions()[index], "reaction_type", "")
-        return "Lindemann" in rtype
+        rtype = getattr(self.gas.reactions()[index], "reaction_type", "").lower()
+        return rtype == "falloff-lindemann"
 
     def check_reaction_type(self, index: int) -> str:
         """Return the OpenFOAM reaction type for the reaction at *index*.
@@ -202,14 +202,14 @@ class canteraToFoam:
         """
 
         rxn = self.gas.reactions()[index]
-        rtype = getattr(rxn, "reaction_type", "")
+        rtype = getattr(rxn, "reaction_type", "").lower()
 
         # Reactions with explicit orders are treated as irreversible Arrhenius
         # since OpenFOAM cannot represent arbitrary forward orders.
         if getattr(rxn, "orders", None):
             return "irreversibleArrhenius"
 
-        if rtype == "three-body-Arrhenius":
+        if rtype == "three-body-arrhenius":
             return (
                 "reversibleThirdBodyArrhenius"
                 if self.is_reversible(index)
@@ -223,15 +223,36 @@ class canteraToFoam:
             return "reversibleArrhenius"
 
         if self.is_troe(index):
-            return "reversibleArrheniusTroeFallOff"
+            return (
+                "reversibleArrheniusTroeFallOff"
+                if self.is_reversible(index)
+                else "irreversibleArrheniusTroeFallOff"
+            )
 
         if self.is_lindemann(index):
-            return "reversibleArrheniusLindemannFallOff"
+            return (
+                "reversibleArrheniusLindemannFallOff"
+                if self.is_reversible(index)
+                else "irreversibleArrheniusLindemannFallOff"
+            )
 
-        return "unknown"
+        raise ValueError(f"Unknown reaction type: {rtype}")
 
     def _arrhenius_coeffs(self, index: int):
         return self.get_arrhenius_parameters(index)
+
+    def _arrhenius_from_rate(self, rate):
+        """Return Arrhenius parameters from a Cantera ``Rate`` object."""
+        try:
+            A = rate.pre_exponential_factor
+            b = rate.temperature_exponent
+            Ea = rate.activation_energy
+        except AttributeError:
+            A = rate.A
+            b = rate.b
+            Ea = rate.Ea
+        Ta = Ea / ct.gas_constant
+        return A, Ta, b
 
     def _reaction_equation_string(self, rxn) -> str:
         left = []
@@ -249,38 +270,102 @@ class canteraToFoam:
             right.append(f"{coeff}{sp}")
         return " + ".join(left) + " = " + " + ".join(right)
 
-    def _irreversible_reaction_string(self, index: int) -> str:
+    def _reaction_block_start(self, index: int, typ: str, A: float, b: float, Ta: float):
         rxn = self.gas.reactions()[index]
-        A, Ta, b = self._arrhenius_coeffs(index)
         eq = self._reaction_equation_string(rxn)
         lines = [
             f"un-named-reaction-{index}",
             "{",
-            "    type            irreversibleArrhenius;",
+            f"    type            {typ};",
             f"    reaction        \"{eq}\";",
             f"    A               {A};",
             f"    beta            {b};",
             f"    Ta              {Ta};",
-            "}",
         ]
+        return lines
+
+    def _block_end(self) -> str:
+        return "}"
+
+    def _irreversible_reaction_string(self, index: int) -> str:
+        A, Ta, b = self._arrhenius_coeffs(index)
+        lines = self._reaction_block_start(index, "irreversibleArrhenius", A, b, Ta)
+        lines.append(self._block_end())
         return "\n".join(lines)
 
     def _reversible_reaction_string(self, index: int) -> str:
         """Return an OpenFOAM reaction block for a reversible Arrhenius reaction."""
 
+        A, Ta, b = self._arrhenius_coeffs(index)
+        lines = self._reaction_block_start(index, "reversibleArrhenius", A, b, Ta)
+        lines.append(self._block_end())
+        return "\n".join(lines)
+
+    # --- Extended reaction writers -----------------------------------------
+
+    def _third_body_coeff_lines(self, effs: dict) -> list:
+        lines = ["    coeffs", str(len(effs)), "    ("]
+        for sp, val in effs.items():
+            lines.append(f"    ({sp} {val})")
+        lines += ["    )", "    ;"]
+        return lines
+
+    def _third_body_efficiencies_block(self, effs: dict) -> list:
+        lines = ["    thirdBodyEfficiencies", "    {"]
+        inner = self._third_body_coeff_lines(effs)
+        lines.extend(["        " + l.strip() if i > 0 else l for i, l in enumerate(inner)])
+        lines.append("    }")
+        return lines
+
+    def _arrhenius_sub_block(self, name: str, rate) -> list:
+        A, Ta, b = self._arrhenius_from_rate(rate)
+        lines = [f"    {name}", "    {", f"        A               {A};", f"        beta            {b};", f"        Ta              {Ta};", "    }"]
+        return lines
+
+    def _troe_params_block(self, coeffs) -> list:
+        alpha, tsss, ts, tss = coeffs
+        lines = ["    F", "    {", f"        alpha           {alpha};", f"        Tsss            {tsss};", f"        Ts              {ts};", f"        Tss             {tss};", "    }"]
+        return lines
+
+    def _third_body_reaction_string(self, index: int) -> str:
         rxn = self.gas.reactions()[index]
         A, Ta, b = self._arrhenius_coeffs(index)
+        typ = (
+            "reversibleThirdBodyArrhenius" if self.is_reversible(index) else "irreversibleThirdBodyArrhenius"
+        )
+        lines = self._reaction_block_start(index, typ, A, b, Ta)
+        lines += self._third_body_coeff_lines(rxn.third_body.efficiencies)
+        lines.append(self._block_end())
+        return "\n".join(lines)
+
+    def _lindemann_reaction_string(self, index: int) -> str:
+        rxn = self.gas.reactions()[index]
+        typ = (
+            "reversibleArrheniusLindemannFallOff" if self.is_reversible(index) else "irreversibleArrheniusLindemannFallOff"
+        )
         eq = self._reaction_equation_string(rxn)
-        lines = [
-            f"un-named-reaction-{index}",
-            "{",
-            "    type            reversibleArrhenius;",
-            f"    reaction        \"{eq}\";",
-            f"    A               {A};",
-            f"    beta            {b};",
-            f"    Ta              {Ta};",
-            "}",
-        ]
+        lines = [f"un-named-reaction-{index}", "{", f"    type            {typ};", f"    reaction        \"{eq}\";"]
+        rate = rxn.rate
+        lines += self._arrhenius_sub_block("k0", rate.low_rate)
+        lines += self._arrhenius_sub_block("kInf", rate.high_rate)
+        lines += ["    F", "    {", "    }"]
+        lines += self._third_body_efficiencies_block(rxn.third_body.efficiencies)
+        lines.append("}")
+        return "\n".join(lines)
+
+    def _troe_reaction_string(self, index: int) -> str:
+        rxn = self.gas.reactions()[index]
+        typ = (
+            "reversibleArrheniusTroeFallOff" if self.is_reversible(index) else "irreversibleArrheniusTroeFallOff"
+        )
+        eq = self._reaction_equation_string(rxn)
+        lines = [f"un-named-reaction-{index}", "{", f"    type            {typ};", f"    reaction        \"{eq}\";"]
+        rate = rxn.rate
+        lines += self._arrhenius_sub_block("k0", rate.low_rate)
+        lines += self._arrhenius_sub_block("kInf", rate.high_rate)
+        lines += self._troe_params_block(rate.falloff_coeffs)
+        lines += self._third_body_efficiencies_block(rxn.third_body.efficiencies)
+        lines.append("}")
         return "\n".join(lines)
 
     def chemistry_file_string(self, indices=None) -> str:
@@ -293,8 +378,20 @@ class canteraToFoam:
                 block = self._irreversible_reaction_string(i)
             elif typ == "reversibleArrhenius":
                 block = self._reversible_reaction_string(i)
+            elif typ in ("reversibleThirdBodyArrhenius", "irreversibleThirdBodyArrhenius"):
+                block = self._third_body_reaction_string(i)
+            elif typ in (
+                "reversibleArrheniusLindemannFallOff",
+                "irreversibleArrheniusLindemannFallOff",
+            ):
+                block = self._lindemann_reaction_string(i)
+            elif typ in (
+                "reversibleArrheniusTroeFallOff",
+                "irreversibleArrheniusTroeFallOff",
+            ):
+                block = self._troe_reaction_string(i)
             else:
-                block = ""  # unhandled types
+                block = ""
             for ln in block.splitlines():
                 lines.append("    " + ln)
         lines.append("}")
