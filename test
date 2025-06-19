@@ -1,4 +1,6 @@
 rm -rf ./singleStep/output/*
 rm -rf ./multiStep/output/*
+rm -rf ./plog/output/*
 python main.py ./singleStep/cantera/ ./singleStep/output/
 python main.py ./multiStep/cantera/ ./multiStep/output/
+python main.py ./plog/cantera/ ./plog/output/

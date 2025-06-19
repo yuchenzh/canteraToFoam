@@ -82,29 +82,69 @@ class canteraToFoam:
     # --- Transport reader ---------------------------------------------------
 
     def read_transport(self, path: str) -> dict:
-        """Read an OpenFOAM-style ``transportProperties`` file."""
-        data = {}
+        """Read an OpenFOAM-style ``transportProperties`` file.
+
+        The returned dictionary contains an entry for every species in the
+        mechanism.  Species explicitly listed in ``transportProperties`` retain
+        their specified ``As`` and ``Ts`` values while all others take the
+        values from the ``".*"`` entry.
+        """
+
+        raw = {}
         current = None
+
         if not os.path.exists(path):
-            return data
+            return {}
+
         with open(path) as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("//"):
                     continue
-                if line.endswith("{") and not line.startswith("transport"):
-                    current = line.strip("{").strip().strip('"')
-                    data.setdefault(current, {})
-                elif line.startswith("As"):
+
+                # species name lines
+                if line.startswith('"'):
+                    # handle both '"H2"' and '"H2"{' forms
+                    current = line.strip('"')
+                    if current.endswith('{'):
+                        current = current[:-1].strip()
+                    raw.setdefault(current, {})
+                    continue
+
+                if line == '{' or line == 'transport' or line.startswith('transport'):
+                    # ignore standalone braces and transport keywords
+                    continue
+
+                if line.startswith("As") and current is not None:
                     try:
-                        data[current]["As"] = float(line.split()[1].strip(";"))
+                        raw[current]["As"] = float(line.split()[1].strip(";"))
                     except (IndexError, ValueError, TypeError):
                         pass
-                elif line.startswith("Ts"):
+                    continue
+
+                if line.startswith("Ts") and current is not None:
                     try:
-                        data[current]["Ts"] = float(line.split()[1].strip(";"))
+                        raw[current]["Ts"] = float(line.split()[1].strip(";"))
                     except (IndexError, ValueError, TypeError):
                         pass
+                    continue
+
+                # reset current after closing a species block
+                if line == "}":
+                    current = None
+
+        default = raw.get(".*") or raw.get("*") or {"As": 1.67212e-06, "Ts": 170.672}
+
+        data = {}
+        for sp in self.gas.species_names:
+            if sp in raw:
+                data[sp] = {
+                    "As": raw[sp].get("As", default.get("As")),
+                    "Ts": raw[sp].get("Ts", default.get("Ts")),
+                }
+            else:
+                data[sp] = default.copy()
+
         return data
 
     # --- OpenFOAM thermo file helpers -------------------------------------------------
@@ -218,6 +258,9 @@ class canteraToFoam:
         if getattr(rxn, "orders", None):
             return "irreversibleArrhenius"
 
+        if self.is_plog(index):
+            return "pressureDependentArrhenius"
+
         if rtype == "three-body-arrhenius":
             return (
                 "reversibleThirdBodyArrhenius"
@@ -262,6 +305,49 @@ class canteraToFoam:
             Ea = rate.Ea
         Ta = Ea / ct.gas_constant
         return A, Ta, b
+
+    def _plog_coeffs(self, index: int) -> list:
+        """Return pressure-dependent Arrhenius coefficients for a reaction."""
+
+        rxn = self.gas.reactions()[index]
+        if not isinstance(rxn.rate, ct.reaction.PlogRate):
+            raise ValueError("Reaction does not use PLOG form")
+
+        coeffs = []
+        for P, arr in rxn.rate.rates:
+            A, Ta, b = self._arrhenius_from_rate(arr)
+            coeffs.append((P, A, b, Ta))
+        return coeffs
+
+    def is_plog(self, index: int) -> bool:
+        """Return ``True`` if the reaction uses pressure-dependent Arrhenius rates."""
+
+        rxn = self.gas.reactions()[index]
+        return isinstance(getattr(rxn, "rate", None), ct.reaction.PlogRate)
+
+    def _plog_block(self, coeffs) -> list:
+        """Return the ``ArrheniusData`` block for pressure-dependent rates."""
+
+        lines = ["    ArrheniusData", "    (", "        // convert MPa to Pa"]
+        for P, A, b, Ta in coeffs:
+            P_pa = P * 1e6
+            lines.append(
+                f"        ({P_pa:.6g}  {A:.6g} {b:.6g} {Ta:.6g} )   // PLOG /p A beta Ta/"
+            )
+        lines.append("    );")
+        return lines
+
+    def _plog_reaction_string(self, index: int) -> str:
+        """Return an OpenFOAM block for a pressure-dependent Arrhenius reaction."""
+
+        coeffs = self._plog_coeffs(index)
+        A0, Ta0, b0 = coeffs[0][1], coeffs[0][3], coeffs[0][2]
+        lines = self._reaction_block_start(
+            index, "pressureDependentArrhenius", A0, b0, Ta0
+        )
+        lines += self._plog_block(coeffs)
+        lines.append(self._block_end())
+        return "\n".join(lines)
 
     def _reaction_equation_string(self, rxn) -> str:
         left = []
@@ -344,8 +430,22 @@ class canteraToFoam:
         return lines
 
     def _troe_params_block(self, coeffs) -> list:
-        alpha, tsss, ts, tss = coeffs
-        lines = ["    F", "    {", f"        alpha           {alpha};", f"        Tsss            {tsss};", f"        Ts              {ts};", f"        Tss             {tss};", "    }"]
+        """Return the ``F`` block for Troe falloff coefficients."""
+
+        # Some mechanisms omit the ``Tss`` value
+        alpha, tsss, ts, *rest = coeffs
+        tss = rest[0] if rest else None
+
+        lines = [
+            "    F",
+            "    {",
+            f"        alpha           {alpha};",
+            f"        Tsss            {tsss};",
+            f"        Ts              {ts};",
+        ]
+        if tss is not None:
+            lines.append(f"        Tss             {tss};")
+        lines.append("    }")
         return lines
 
     def _third_body_reaction_string(self, index: int) -> str:
@@ -411,6 +511,8 @@ class canteraToFoam:
                 "irreversibleArrheniusTroeFallOff",
             ):
                 block = self._troe_reaction_string(i)
+            elif typ == "pressureDependentArrhenius":
+                block = self._plog_reaction_string(i)
             else:
                 block = ""
             for ln in block.splitlines():
